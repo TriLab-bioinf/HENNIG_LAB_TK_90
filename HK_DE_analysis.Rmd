@@ -1,0 +1,280 @@
+---
+title: "DE analysis based on HK's scripts"
+output:
+  html_document:
+    df_print: paged
+---
+
+#### Load libraries
+```{r}
+library(DESeq2) # do diff. expression analysis
+library(dplyr) # to handle data.frames
+library(ggplot2) # to make nice plots
+library(RUVSeq)
+library("RColorBrewer")
+```
+
+#### Load data
+```{r}
+# define directory where raw files are lying
+directory <- "./05-htseq-mm10/"
+
+##################
+### READ FILES ###
+##################
+# name the files from condition 1
+sampleFiles_Con <- c("WT2_p13.txt",
+                     "WT3_p13.txt",
+                     "WT4_p13.txt")
+
+# name the files from condition 1
+sampleCondition_Con <- c("Con",
+                         "Con",
+                         "Con")
+
+
+# name the files from condition 2
+sampleFiles_Y665F <- c("STAT5BY665F_1846_het_p13.txt",
+                       "STAT5BY665F_1933_homo_p13.txt",
+                       "STAT5BY665F_1950_het_p13.txt",
+                       "STAT5BY665F_1958_het_p13.txt",
+                       "STAT5BY665F_1968_het_p13.txt")
+
+# name the files from condition 2
+sampleCondition_Y665F <- c("Y665F",
+                           "Y665F",
+                           "Y665F",
+                           "Y665F",
+                           "Y665F")
+
+
+### You can do the same thing for more conditions, just repeat it, and add the names below!
+
+sampleFiles <- c(sampleFiles_Con, sampleFiles_Y665F)
+sampleCondition <- c(sampleCondition_Con, sampleCondition_Y665F)
+
+
+sampleTable <- data.frame(sampleName = sampleFiles,
+                          fileName = sampleFiles,
+                          condition = sampleCondition)
+
+
+
+ddsHTSeq <- DESeqDataSetFromHTSeqCount(sampleTable = sampleTable,
+                                       directory = directory,
+                                       design= ~condition)
+
+
+dds <- ddsHTSeq
+dds$condition <- relevel(dds$condition, ref = "Con")
+
+keep <- rowSums(counts(dds)) >= 7     #the number of total files
+dds <- dds[keep,]
+
+#dds <- DESeq(dds)
+
+#chage the date of workspace
+save.image(file = "./WORKSPACE-20210430-2.RData")
+
+```
+
+
+```{r}
+#---write counts--------------------------------------------------------
+mycounts <- counts(dds)
+#deseq_ncounts <- round(counts(dds, normalized=TRUE), digits = 0)
+
+
+#---filter the counts for RUV normalization--------------------------------------------------------
+# choose that the gene should be in one third of the samples
+# amount of reads is never defined, but maybe more conservative is better - hope so
+
+filter <- apply(mycounts, 1, function(x) length(x[which(x>10)])>3)
+filtered <- as.matrix(mycounts)[filter,]
+
+#---create negative control from own genes for RUV normalization----------------------------------- 
+genes <- rownames(filtered)
+
+x <- as.factor(sampleCondition)
+
+
+#---create expression set for RUV normalization-----------------------------------
+set_raw <- newSeqExpressionSet(as.matrix(filtered), phenoData = data.frame(x, row.names = colnames(filtered)))
+
+#---plot raw data-----------------------------------
+colors <- brewer.pal(8, "Dark2")
+RLEplot_raw <- plotRLE(set_raw , outline=FALSE, ylim=c(-4, 4), ylab="Relative Log Expression", col=colors[x])
+
+
+PCAplot_raw <- plotPCA(set_raw,col=colors[x], cex=0.7)
+```
+
+
+#### RUV normalization with residuals
+```{r}
+#----uq normalization for RUV ------------------------------------------------------------------
+set <- betweenLaneNormalization(set_raw, which="upper")
+
+#plotRLE(set, outline=TRUE, ylim=c(-4, 4), ylab="Relative Log Expression", col=colors[x])
+#plotPCA(set,col=colors[x], cex=1.2)
+
+
+
+#----RUV normalization with residuals-----------------------------------------------------------------
+design <- model.matrix(~x, data=pData(set))
+y <- DGEList(counts=counts(set), group=x)
+y <- calcNormFactors(y, method = "upperquartile")
+y <- estimateGLMCommonDisp(y, design)
+y <- estimateGLMTagwiseDisp(y, design)
+
+fit <- glmFit(y, design)
+res <- residuals(fit, type="deviance")
+
+seqUQ <- betweenLaneNormalization(set_raw, which="upper")
+controls <- rownames(set_raw)
+
+set1 <- RUVr(set, genes, k=1,res)
+pData(set1)
+
+png(filename="p13-3-rle-plot-beforeRUV.png", width=600, height=600)
+  plotRLE(set1, outline=FALSE, ylim=c(-4, 4), ylab="Relative Log Expression", col=colors[x], las = 2)
+dev.off()
+
+png(filename="p13-3-pca-plot-beforeRUV.png", width=600, height=600)
+  plotPCA(set1,col=colors[x], cex=0.7)
+dev.off()
+
+set2 <- RUVr(set, genes, k=2,res)
+
+seqRUVr <- RUVr(seqUQ, controls, k=2, res)
+
+pData(set2)
+
+png(filename="p13-3-rle-plot-afterRUV.png", width=600, height=600)
+  plotRLE(set2, outline=FALSE, ylim=c(-4, 4), ylab="Relative Log Expression", col=colors[x], las = 2)
+dev.off()
+
+png(filename="p13-3-pca-plot-afterRUV.png", width=600, height=600)
+  plotPCA(set2,col=colors[x], cex=1, labels = F, pch = 19)
+dev.off()
+
+png(filename="p13-3-pca_with_name-plot-afterRUV.png", width=600, height=600)
+  plotPCA(set2,col=colors[x], cex=1, labels = T, pch = 19)
+dev.off()
+```
+
+
+#### Run DESeq2
+```{r}
+
+#############################
+### Combine RUV and DESeq ###
+#############################
+
+ddsMF <- dds
+ddsMF$fuv1 <- pData(set2)$W_1
+ddsMF$fuv2 <- pData(set2)$W_2
+design(ddsMF) <- formula(~fuv1 + fuv2 + condition)
+
+ddsMF <- DESeq(ddsMF)
+
+```
+
+#### Get results
+```{r}
+####################################
+### Differential expressed genes ###
+####################################
+res <- results(ddsMF, contrast = c("condition","Y665F","Con"))
+
+df <- as.data.frame(res)
+
+ncountsMF <- counts(ddsMF, normalized=TRUE)
+
+df_merged <- merge(ncountsMF, df, by="row.names")
+colnames(df_merged)[1] <- "Gene"
+df_merged <- select(df_merged, Gene, 
+                    'WT2_p13.txt',
+                    'WT3_p13.txt',
+                    'WT4_p13.txt',
+                    'STAT5BY665F_1846_het_p13.txt',
+                    'STAT5BY665F_1933_homo_p13.txt',
+                    'STAT5BY665F_1950_het_p13.txt',
+                    'STAT5BY665F_1958_het_p13.txt',
+                    'STAT5BY665F_1968_het_p13.txt', log2FoldChange, pvalue, padj)
+
+meanCon <- as.data.frame(cbind(df_merged$`WT2_p13.txt`,
+                               df_merged$`WT3_p13.txt`,
+                               df_merged$`WT4_p13.txt`))
+
+meanY665F <- as.data.frame(cbind(df_merged$`STAT5BY665F_1846_het_p13.txt`,
+                                 df_merged$`STAT5BY665F_1933_homo_p13.txt`,
+                                 df_merged$`STAT5BY665F_1950_het_p13.txt`,
+                                 df_merged$`STAT5BY665F_1958_het_p13.txt`,
+                                 df_merged$`STAT5BY665F_1968_het_p13.txt`))
+
+df_merged_addOn <- cbind(df_merged, rowMeans(meanCon), rowMeans(meanY665F))
+colnames(df_merged_addOn) <- c(colnames(df_merged),"mean_Con", "mean_Y665F")   #the location of mean cloumn in the result = the number of total files 8+5
+
+write.table(df_merged_addOn, "p13_Con vs Y665F.txt", quote = F, col.names = TRUE,
+            row.names = FALSE, sep = "\t")
+
+
+```
+
+
+#### Plot gene expression for Wap, Csn2 and Csn3
+```{r}
+for (g in c("Wap","Csn2","Csn3")){ 
+  DESeq2::plotCounts(ddsMF, gene = g, intgroup = c("condition"), normalized = TRUE, transform = T, col = ddsMF@colData$condition, main = g)
+}
+```
+
+#### Testing TPM normalization
+```{r}
+
+# Function to normalize by TPMs based on transcript length
+# Normalize counts to TPMs
+# Fetch exon length from STAR read counts file 
+normalize_by_TPM <- function(counts.df, gene_length) {
+  
+  # Calculate transcript length in Kb
+  transcript_lengths <- gene_length / 1000
+  transcript_lengths <- subset(transcript_lengths, rownames(transcript_lengths) %in% rownames(counts.df))
+  
+  # Eliminate gene IDs from counts.df without transcript length info in transcript_lengths
+  #transcript_lengths <- transcript_lengths[transcript_lengths$Category %in% rownames(counts.df),]
+  #counts.df <- counts.df[transcript_lengths$Category,]
+  
+  # Sort transcripts_length df by rownames of counts.df
+  transcript_lengths <- transcript_lengths[rownames(counts.df),, drop=F]
+
+  # See reference for formula
+  # https://bioinformatics.ccr.cancer.gov/btep/questions/what-is-the-difference-between-rpkm-fpkm-and-tpm
+  x.df <- apply(counts.df, 
+                MARGIN = 2, 
+                FUN = function(x){ 
+                                  reads_per_kb <- x/transcript_lengths[,1]
+                                  pmsf <- sum(reads_per_kb) / 1e6
+                                  reads_per_kb/pmsf
+                                  }
+                )
+  
+  return(x.df)
+}
+
+# Estimate gene length
+library(GenomicFeatures) 
+#txdb <- makeTranscriptDbFromGFF("./data/genes.gtf",format="gtf")
+txdb <- GenomicFeatures::makeTxDbFromGFF("./data/genes.gtf",format="gtf")
+exons.list.per.gene <- exonsBy(txdb,by="gene")
+exonic.gene.sizes <- as.data.frame(sum(width(reduce(exons.list.per.gene))))
+
+
+counts.tpm <- normalize_by_TPM(counts.df = as.data.frame(counts(ddsMF)), gene_length = exonic.gene.sizes)
+
+counts.tpm
+
+round(subset(counts.tpm, rownames(counts.tpm) %in% c("Wap","Csn2","Csn3")), digits = 0)
+```
+
