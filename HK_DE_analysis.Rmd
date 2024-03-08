@@ -278,3 +278,8 @@ counts.tpm
 round(subset(counts.tpm, rownames(counts.tpm) %in% c("Wap","Csn2","Csn3")), digits = 0)
 ```
 
+#### Session info
+```{r}
+print(sessionInfo())
+```
+
